@@ -3,8 +3,8 @@
   "chatId": null,
   "projects": [
     {
-      "topic": "",
-      "url": ""
+      "topic": "CentralTelAvivRental",
+      "url": "https://www.yad2.co.il/realestate/rent?minPrice=8000&maxPrice=11000&minRooms=2.5&maxRooms=3.5&multiNeighborhood=1521%2C848%2C1519%2C1461%2C1520"
     }
   ]
 }
