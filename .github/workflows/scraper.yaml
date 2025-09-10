@@ -1,41 +1,39 @@
-name: Yad2 Scraper
+name: Run Scraper Daily
 
 on:
   schedule:
-    - cron: '*/15 5-17 * * *'
+    - cron: "0 8 * * *"
+    - cron: "0 13 * * *"
+    - cron: "0 17 * * *"
   workflow_dispatch:
-    branches:
-      - '**'
 
 jobs:
-  scraper:
+  run-scraper:
     runs-on: ubuntu-latest
-    permissions:
-      contents: write
     steps:
-      - name: Checkout
+      - name: Checkout repository
         uses: actions/checkout@v3
 
-      - name: Install packages
-        run: yarn install
+      - name: Set up Node.js
+        uses: actions/setup-node@v3
+        with:
+          node-version: "22"
 
-      - name: Setup git config
-        run: |
-          git config user.name "GitHub Actions"
-          git config user.email "${{ secrets.GIT_CONFIG_EMAIL }}"
+      - name: Install dependencies
+        run: yarn
 
       - name: Run scraper
-        run: |
-          export API_TOKEN=${{ secrets.API_TOKEN }}
-          export CHAT_ID=${{ secrets.CHAT_ID }}
-          yarn scrape
+        env:
+          API_TOKEN: ${{ secrets.API_TOKEN }}
+          CHAT_ID: ${{ secrets.CHAT_ID }}
+        run: node scraper.js
 
-      - name: Push new json data if needed
+      - name: Commit and push changes in data folder
         run: |
-          if [ -f ./push_me ]; then
-            echo Pushing to Github...
-            git add .
-            DATE=$(date +"%F, %H:%M:%S")
-            git commit -m "updated data - $DATE"
+          git config --global user.name 'github-actions[bot]'
+          git config --global user.email 'github-actions[bot]@users.noreply.github.com'
+          if [[ -n $(git status --porcelain data/) ]]; then
+            git add data/
+            git commit -m "Update data folder from scheduled scraper run"
             git push
           fi

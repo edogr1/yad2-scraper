@@ -3,22 +3,27 @@ const Telenode = require("telenode-js");
 const fs = require("fs");
 const config = require("./config.json");
 
-const getYad2Response = async (url) => {
-  const requestOptions = {
-    method: "GET",
-    redirect: "follow",
-  };
+const MAX_MESSAGE_LENGTH = 4096;
+
+const getYad2HTML = async (url) => {
   try {
-    const res = await fetch(url, requestOptions);
+    const res = await fetch(url, {
+      method: "GET",
+      redirect: "follow",
+    });
     return await res.text();
   } catch (err) {
     console.log(err);
   }
 };
 
+const getItemIdFromUrl = (url) => {
+  return url.split("/item/")[1].split("?")[0] ?? "";
+};
+
 const scrapeItemsAndExtractUrls = async (url) => {
   // Get Yad2 HTML.
-  const yad2Html = await getYad2Response(url);
+  const yad2Html = await getYad2HTML(url);
   if (!yad2Html) {
     throw new Error("Could not get Yad2 response");
   }
@@ -54,43 +59,77 @@ const scrapeItemsAndExtractUrls = async (url) => {
   return itemUrls;
 };
 
-const checkIfHasNewItem = async (imgUrls, topic) => {
+// If maxPages === 0, scrape until an empty page is encountered (all pages)
+const scrapeAllPagesAndExtractImgUrls = async (baseUrl, maxPages = 0) => {
+  const allItemsUrls = [];
+  let page = 1;
+  while (true) {
+    const pageUrl = page === 1 ? baseUrl : `${baseUrl}&page=${page}`;
+    const pageItemsUrls = await scrapeItemsAndExtractUrls(pageUrl);
+    // Stop if a subsequent page returns no items
+    if (page > 1 && pageItemsUrls.length === 0) {
+      break;
+    }
+    allItemsUrls.push(...pageItemsUrls);
+    // When maxPages > 0, stop after reaching that page number
+    if (maxPages > 0 && page >= maxPages) {
+      break;
+    }
+    page++;
+  }
+  return allItemsUrls;
+};
+
+const checkIfHasNewItem = async (itemUrls, topic) => {
   const filePath = `./data/${topic}.json`;
+  const itemsIds = itemUrls.map(getItemIdFromUrl);
   let savedUrls = [];
   try {
     savedUrls = require(filePath);
   } catch (e) {
     if (e.code === "MODULE_NOT_FOUND") {
-      fs.mkdirSync("data");
+      fs.mkdirSync("data", { recursive: true });
       fs.writeFileSync(filePath, "[]");
     } else {
       console.log(e);
       throw new Error(`Could not read / create ${filePath}`);
     }
   }
-  let shouldUpdateFile = false;
-  savedUrls = savedUrls.filter((savedUrl) => {
-    shouldUpdateFile = true;
-    return imgUrls.includes(savedUrl);
+  // Cleaning old saved ids that are no longer present in the new scrape.
+  const savedIds = savedUrls.map(getItemIdFromUrl);
+  savedUrls = savedUrls.filter((_, index) => {
+    const savedItemId = savedIds[index];
+    return itemsIds.includes(savedItemId);
   });
-  const newItems = [];
-  imgUrls.forEach((url) => {
-    if (!savedUrls.includes(url)) {
-      savedUrls.push(url);
-      newItems.push(url);
+  let shouldUpdateFile = false;
+  const newItemsUrls = [];
+  itemUrls.forEach((url, index) => {
+    const itemId = itemsIds[index];
+    if (!savedIds.includes(itemId)) {
       shouldUpdateFile = true;
+      savedUrls.push(url);
+      newItemsUrls.push(url);
+      savedIds.push(itemId);
     }
   });
   if (shouldUpdateFile) {
     const updatedUrls = JSON.stringify(savedUrls, null, 2);
     fs.writeFileSync(filePath, updatedUrls);
-    createPushFlagForWorkflow();
   }
-  return newItems;
+  return newItemsUrls;
 };
 
-const createPushFlagForWorkflow = () => {
-  fs.writeFileSync("push_me", "");
+const sendResultsMessage = async (telenode, newItems, chatId) => {
+  if (newItems.join("\n----------\n").length < MAX_MESSAGE_LENGTH) {
+    await telenode.sendTextMessage(newItems.join("\n----------\n"), chatId);
+  } else {
+    const promises = [];
+    for (let i = 0; i < newItems.length; i += 5) {
+      const chunk = newItems.slice(i, i + 5).join("\n----------\n");
+      promises.push(telenode.sendTextMessage(chunk, chatId));
+    }
+    await Promise.all(promises);
+  }
 };
 
 const scrape = async (topic, url) => {
@@ -102,14 +141,18 @@ const scrape = async (topic, url) => {
       `Starting scanning ${topic} on link:\n${url}`,
       chatId
     );
-    const scrapeImgResults = await scrapeItemsAndExtractUrls(url);
+    const scrapeImgResults = await scrapeAllPagesAndExtractImgUrls(
+      url,
+      config.maxPages
+    );
     const newItems = await checkIfHasNewItem(scrapeImgResults, topic);
     if (newItems.length > 0) {
-      const newItemsJoined = newItems.join("\n----------\n");
-      const msg = `${newItems.length} new items:\n${newItemsJoined}`;
-      await telenode.sendTextMessage(msg, chatId);
+      await sendResultsMessage(telenode, newItems, chatId);
     } else {
-      await telenode.sendTextMessage("No new items were added", chatId);
+      await telenode.sendTextMessage(
+        `No new items were added for topic ${topic}`,
+        chatId
+      );
     }
   } catch (e) {
     let errMsg = e?.message || "";
@@ -124,19 +167,15 @@ const scrape = async (topic, url) => {
   }
 };
 
-const program = async () => {
-  await Promise.all(
-    config.projects
-      .filter((project) => {
-        if (project.disabled) {
-          console.log(`Topic "${project.topic}" is disabled. Skipping.`);
-        }
-        return !project.disabled;
-      })
-      .map(async (project) => {
-        await scrape(project.topic, project.url);
-      })
-  );
+const main = async () => {
+  for (let i = 0; i < config.projects.length; i++) {
+    const project = config.projects[i];
+    if (project.disabled) {
+      console.log(`Topic "${project.topic}" is disabled. Skipping.`);
+      continue;
+    }
+    await scrape(project.topic, project.url);
+  }
 };
 
-program();
+main();
